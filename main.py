@@ -18,6 +18,7 @@ NTSC_WEIGHTS = np.array([0.299, 0.587, 0.114], dtype=np.float32)
 def load_linear_rgb(path):
     """Load a linear HDR image, normalized by its single brightest R, G or B sample."""
     rgb = OpenEXR.File(path).channels()["RGB"].pixels.astype(np.float32)
+    rgb = cv2.resize(rgb, dsize=None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
     return np.clip(rgb / rgb.max(), 0.0, 1.0)
 
 
@@ -60,6 +61,8 @@ if __name__ == "__main__":
     # Mantiuk: strength as a percentage, gain ceiling stored as (value - 1)
     cv2.createTrackbar("mantiuk strength", WINDOW, 100, 100, lambda v: None)
     cv2.createTrackbar("mantiuk max_gain", WINDOW, 8 - 1, 32 - 1, lambda v: None)
+    # The solver is the slow part; fewer iterations trade accuracy for responsiveness
+    cv2.createTrackbar("mantiuk iters", WINDOW, 150, 500, lambda v: None)
 
     params = None
     while cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) >= 1:
@@ -68,11 +71,13 @@ if __name__ == "__main__":
         num_levels = cv2.getTrackbarPos("ahe num_levels", WINDOW) + 2
         eps_pos = cv2.getTrackbarPos("ahe guided_eps", WINDOW)
         window_px = max(cv2.getTrackbarPos("ahe window_px", WINDOW), 8)
-        strength = cv2.getTrackbarPos("mantiuk strength", WINDOW) / 100.0
+        strength = cv2.getTrackbarPos("mantiuk strength", WINDOW) * 10.0 / 100.0
         max_gain = cv2.getTrackbarPos("mantiuk max_gain", WINDOW) + 1
+        iterations = max(cv2.getTrackbarPos("mantiuk iters", WINDOW), 10)
 
         # Recompute only when a slider actually moved
-        current = (operator, s_spatial, num_levels, eps_pos, window_px, strength, max_gain)
+        current = (operator, s_spatial, num_levels, eps_pos, window_px,
+                   strength, max_gain, iterations)
         if current != params:
             params = current
 
@@ -85,10 +90,13 @@ if __name__ == "__main__":
                                                     num_levels=num_levels, guided_eps=guided_eps,
                                                     window_px=window_px)
             else:
-                print(f"Mantiuk: strength={strength:.2f}, max_gain={max_gain}...")
+                print(f"Mantiuk: strength={strength:.2f}, max_gain={max_gain}, "
+                      f"iterations={iterations}...")
                 enhanced_log = MantiukContrastEqualization.enhance(log_luminance,
                                                                    strength=strength,
-                                                                   max_gain=max_gain)
+                                                                   max_gain=max_gain,
+                                                                   iterations=iterations,
+                                                                   verbose=True)
 
             enhanced_img = reapply_chroma(rgb_img, luminance, enhanced_log)
             cv2.imshow(WINDOW, enhanced_img)
