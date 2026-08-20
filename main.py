@@ -2,12 +2,16 @@
 Interactive comparison of two local contrast enhancers on an HDR image.
 
 Everything common lives here: loading the linear image, reducing it to log-luminance,
-reapplying chroma afterwards, and the trackbar UI. The two operators are independent
-implementations that share only the log-luminance in / log-luminance out interface.
+reapplying chroma afterwards, and the Dear PyGui interface. The two operators are
+independent implementations that share only the log-luminance in / log-luminance out
+interface.
 """
+import time
+
 import numpy as np
 import cv2
 import OpenEXR
+import dearpygui.dearpygui as dpg
 
 import EdgeAwareAHE
 import MantiukContrastEqualization
@@ -57,76 +61,154 @@ def reapply_chroma(rgb, luminance, enhanced_log_luminance, brightness=0.5):
     return np.clip(np.ascontiguousarray(enhanced_rgb[:, :, ::-1]), 0.0, 1.0)
 
 
+# --- Interface ---------------------------------------------------------------------
+
+IMAGE_PATH = "run/test.exr"
+TEXTURE = "preview_texture"
+PANEL_WIDTH = 340
+
+# Transducer sliders scale these, so capture them before anything is overwritten
+TRANSDUCER_BASE = (MantiukContrastEqualization.TRANSDUCER_EPS,
+                   MantiukContrastEqualization.TRANSDUCER_EXPONENT,
+                   MantiukContrastEqualization.TRANSDUCER_MUL)
+
+state = {}
+
+
+def build_controls():
+    """Every knob, grouped. Values are read off the widgets when recomputing."""
+    dpg.add_radio_button(("Mantiuk contrast equalization", "Edge-aware AHE"),
+                         tag="operator", default_value="Mantiuk contrast equalization")
+
+    with dpg.collapsing_header(label="Mantiuk", default_open=True):
+        dpg.add_slider_float(label="strength", tag="strength", default_value=8.0,
+                             min_value=0.0, max_value=10.0)
+        dpg.add_slider_int(label="iterations", tag="iterations", default_value=50,
+                           min_value=10, max_value=500)
+        dpg.add_slider_float(label="target contrast", tag="target_contrast",
+                             default_value=0.0002, min_value=0.0002, max_value=0.1,
+                             format="%.4f")
+        # 1.0 would divide by zero in reapply_chroma, so the slider stops short of it
+        dpg.add_slider_float(label="brightness", tag="brightness", default_value=0.002,
+                             min_value=0.0, max_value=0.95, format="%.3f")
+
+    with dpg.collapsing_header(label="Transducer (multiples of base)", default_open=True):
+        for tag, label in (("t_eps", "eps"), ("t_exponent", "exponent"), ("t_mul", "mul")):
+            dpg.add_slider_float(label=label, tag=tag, default_value=1.0,
+                                 min_value=0.5, max_value=2.0)
+        dpg.add_text("", tag="transducer_values", wrap=PANEL_WIDTH - 30)
+
+    with dpg.collapsing_header(label="Edge-aware AHE", default_open=False):
+        dpg.add_slider_int(label="s_spatial", tag="s_spatial", default_value=8,
+                           min_value=1, max_value=64)
+        dpg.add_slider_int(label="num_levels", tag="num_levels", default_value=32,
+                           min_value=2, max_value=64)
+        dpg.add_slider_int(label="window px", tag="window_px", default_value=112,
+                           min_value=8, max_value=400)
+        dpg.add_checkbox(label="edge-aware blur", tag="guided", default_value=True)
+        dpg.add_slider_float(label="log10 eps", tag="guided_eps", default_value=-4.0,
+                             min_value=-4.0, max_value=-1.0)
+
+    dpg.add_separator()
+    dpg.add_button(label="Save PNG", callback=save_png, width=-1)
+    dpg.add_text("", tag="status", wrap=PANEL_WIDTH - 30)
+
+
+CONTROLS = ("operator", "strength", "iterations", "target_contrast", "brightness",
+            "t_eps", "t_exponent", "t_mul", "s_spatial", "num_levels", "window_px",
+            "guided", "guided_eps")
+
+
+def current_parameters():
+    """Everything the result depends on, as one comparable tuple."""
+    return tuple(dpg.get_value(tag) for tag in CONTROLS)
+
+
+def any_control_active():
+    """True while a slider is being dragged. Dear PyGui only reports this per item."""
+    return any(dpg.is_item_active(tag) for tag in CONTROLS)
+
+
+def recompute():
+    """Run the selected operator and push the result into the preview texture."""
+    started = time.time()
+
+    if dpg.get_value("operator").startswith("Mantiuk"):
+        scales = (dpg.get_value("t_eps"), dpg.get_value("t_exponent"), dpg.get_value("t_mul"))
+        (MantiukContrastEqualization.TRANSDUCER_EPS,
+         MantiukContrastEqualization.TRANSDUCER_EXPONENT,
+         MantiukContrastEqualization.TRANSDUCER_MUL) = [
+            base * scale for base, scale in zip(TRANSDUCER_BASE, scales)]
+        dpg.set_value("transducer_values", "eps %.5f    exponent %.5f    mul %.5f" % (
+            MantiukContrastEqualization.TRANSDUCER_EPS,
+            MantiukContrastEqualization.TRANSDUCER_EXPONENT,
+            MantiukContrastEqualization.TRANSDUCER_MUL))
+
+        enhanced_log = MantiukContrastEqualization.enhance(
+            state["log_luminance"],
+            strength=dpg.get_value("strength"),
+            iterations=dpg.get_value("iterations"),
+            target_contrast=dpg.get_value("target_contrast"),
+            verbose=True)
+    else:
+        guided_eps = 10.0 ** dpg.get_value("guided_eps") if dpg.get_value("guided") else None
+        enhanced_log = EdgeAwareAHE.enhance(
+            state["log_luminance"],
+            s_spatial=dpg.get_value("s_spatial"),
+            num_levels=dpg.get_value("num_levels"),
+            guided_eps=guided_eps,
+            window_px=dpg.get_value("window_px"))
+
+    bgr = reapply_chroma(state["rgb"], state["luminance"], enhanced_log,
+                         dpg.get_value("brightness"))
+    state["bgr"] = bgr
+
+    # The texture wants RGBA floats; reapply_chroma hands back BGR for OpenCV's benefit
+    rgba = np.empty((*bgr.shape[:2], 4), dtype=np.float32)
+    rgba[:, :, :3] = bgr[:, :, ::-1]
+    rgba[:, :, 3] = 1.0
+    dpg.set_value(TEXTURE, rgba.ravel())
+
+    dpg.set_value("status", "recomputed in %.2fs" % (time.time() - started))
+
+
+def save_png():
+    if state.get("bgr") is not None:
+        cv2.imwrite("run/output_enhanced.png",
+                    np.clip(state["bgr"] * 255.0, 0, 255).astype(np.uint8))
+        dpg.set_value("status", "saved run/output_enhanced.png")
+
+
 if __name__ == "__main__":
-    rgb_img = load_linear_rgb("run/test.exr")
+    rgb_img = load_linear_rgb(IMAGE_PATH)
     log_luminance, luminance = to_log_luminance(rgb_img)
+    height, width = rgb_img.shape[:2]
+    state.update(rgb=rgb_img, log_luminance=log_luminance, luminance=luminance, bgr=None)
 
-    WINDOW = "Local Contrast"
-    WINDOW_AHE = "AHE"
-    cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
-    cv2.namedWindow(WINDOW_AHE, cv2.WINDOW_NORMAL)
+    dpg.create_context()
+    dpg.create_viewport(title="Local Contrast", width=width + PANEL_WIDTH + 40,
+                        height=height + 60)
 
-    # 0 = edge-aware AHE on a bilateral grid, 1 = Mantiuk-style contrast equalization
-    cv2.createTrackbar("operator", WINDOW_AHE, 1, 1, lambda v: None)
+    with dpg.texture_registry():
+        dpg.add_raw_texture(width, height, np.zeros(width * height * 4, dtype=np.float32),
+                            format=dpg.mvFormat_Float_rgba, tag=TEXTURE)
 
-    # AHE: trackbars store (value - 1), so the minimum is 1 and 2
-    cv2.createTrackbar("ahe s_spatial", WINDOW_AHE, 8 - 1, 64 - 1, lambda v: None)
-    cv2.createTrackbar("ahe num_levels", WINDOW_AHE, 32 - 2, 64 - 2, lambda v: None)
-    # Guided blur off at 0, otherwise eps sweeps 1e-4 .. 1e-1 logarithmically
-    cv2.createTrackbar("ahe guided_eps", WINDOW_AHE, 1, 100, lambda v: None)
-    cv2.createTrackbar("ahe window_px", WINDOW_AHE, 112, 400, lambda v: None)
+    with dpg.window(tag="root"):
+        with dpg.group(horizontal=True):
+            with dpg.child_window(width=PANEL_WIDTH, autosize_y=True):
+                build_controls()
+            dpg.add_image(TEXTURE)
 
-    # Mantiuk: strength as a percentage, gain ceiling stored as (value - 1)
-    cv2.createTrackbar("mantiuk strength", WINDOW, 100, 100, lambda v: None)
-    # The solver is the slow part; fewer iterations trade accuracy for responsiveness
-    cv2.createTrackbar("mantiuk iters", WINDOW, 50, 500, lambda v: None)
-    cv2.createTrackbar("mantiuk target contrast", WINDOW, 0, 500, lambda v: None)
-    cv2.createTrackbar("mantiuk brightness", WINDOW, 0, 500, lambda v: None)
+    dpg.set_primary_window("root", True)
+    dpg.setup_dearpygui()
+    dpg.show_viewport()
 
-    params = None
-    while cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) >= 1:
-        operator = cv2.getTrackbarPos("operator", WINDOW_AHE)
-        s_spatial = cv2.getTrackbarPos("ahe s_spatial", WINDOW_AHE) + 1
-        num_levels = cv2.getTrackbarPos("ahe num_levels", WINDOW_AHE) + 2
-        eps_pos = cv2.getTrackbarPos("ahe guided_eps", WINDOW_AHE)
-        window_px = max(cv2.getTrackbarPos("ahe window_px", WINDOW_AHE), 8)
-        strength = cv2.getTrackbarPos("mantiuk strength", WINDOW) / 10.0
-        iterations = max(cv2.getTrackbarPos("mantiuk iters", WINDOW), 10)
-        target_contrast = (cv2.getTrackbarPos("mantiuk target contrast", WINDOW) + 1) / (5000.0 + 1.0)
-        brightness = (cv2.getTrackbarPos("mantiuk brightness", WINDOW) + 1) / (500.0 + 1.0)
-        # Recompute only when a slider actually moved
-        current = (operator, s_spatial, num_levels, eps_pos, window_px,
-                   strength, iterations, target_contrast, brightness)
-        if current != params:
-            params = current
+    parameters = None
+    while dpg.is_dearpygui_running():
+        # Recompute once the user lets go of a slider, not on every frame of a drag
+        if parameters != current_parameters() and not any_control_active():
+            parameters = current_parameters()
+            recompute()
+        dpg.render_dearpygui_frame()
 
-            if operator == 0:
-                guided_eps = None if eps_pos == 0 else 10.0 ** (-4.0 + 3.0 * (eps_pos - 1) / 99.0)
-                blur = "gaussian" if guided_eps is None else f"guided eps={guided_eps:.5f}"
-                print(f"AHE: s_spatial={s_spatial}, num_levels={num_levels}, "
-                      f"window_px={window_px}, {blur}...")
-                enhanced_log = EdgeAwareAHE.enhance(log_luminance, s_spatial=s_spatial,
-                                                    num_levels=num_levels, guided_eps=guided_eps,
-                                                    window_px=window_px)
-            else:
-                print(f"Mantiuk: strength={strength:.2f}, "
-                      f"iterations={iterations}, target_contrast={target_contrast:.2f}...")
-                enhanced_log = MantiukContrastEqualization.enhance(log_luminance,
-                                                                   strength=strength,
-                                                                   iterations=iterations,
-                                                                   target_contrast=target_contrast,
-                                                                   verbose=True)
-
-            enhanced_img = reapply_chroma(rgb_img, luminance, enhanced_log, brightness)
-            
-            cv2.imshow(WINDOW, enhanced_img)
-
-        # Esc or 'q' quits; 's' saves the currently displayed result
-        key = cv2.waitKey(30) & 0xFF
-        if key in (27, ord("q")):
-            break
-        if key == ord("s"):
-            cv2.imwrite("run/output_enhanced.png", np.clip(enhanced_img * 255.0, 0, 255).astype(np.uint8))
-            print("Saved 'run/output_enhanced.png'")
-
-    cv2.destroyAllWindows()
+    dpg.destroy_context()
