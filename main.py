@@ -101,15 +101,20 @@ def bilateral_grid_lhe(image, s_spatial=16, s_intensity=16, num_bins=256):
 
 # --- Example Usage Run ---
 if __name__ == "__main__":
-    # Create a synthetic low-contrast gradient image with a distinct edge
-    synth_img = np.zeros((256, 256), dtype=np.uint8)
-    synth_img[:, :128] = np.linspace(50, 70, 256)[:, None]   # Left dim block
-    synth_img[:, 128:] = np.linspace(180, 200, 256)[:, None] # Right bright block
+    # Load an RGB image and equalize only its "value" channel in HSV space
+    bgr_img = cv2.imread("run/test.jpg", cv2.IMREAD_COLOR)
+    if bgr_img is None:
+        raise FileNotFoundError("Could not load 'test.jpg'")
+
+    hsv_img = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2HSV)
+    hue, sat, val = cv2.split(hsv_img)
 
     # Run Local Histogram Equalization on the bilateral grid
-    enhanced_img = bilateral_grid_lhe(synth_img, s_spatial=16, s_intensity=16)
+    enhanced_val = bilateral_grid_lhe(val, s_spatial=16, s_intensity=16)
+
+    # Reapply the original hue and saturation
+    enhanced_img = cv2.cvtColor(cv2.merge([hue, sat, enhanced_val]), cv2.COLOR_HSV2BGR)
 
     # Save outputs to inspect contrast adaptation near boundaries
-    cv2.imwrite("input.png", synth_img)
-    cv2.imwrite("output_enhanced.png", enhanced_img)
+    cv2.imwrite("run/output_enhanced.png", enhanced_img)
     print("Processing complete. Saved 'input.png' and 'output_enhanced.png'")
