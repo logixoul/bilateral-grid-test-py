@@ -1,5 +1,6 @@
 import numpy as np
 import cv2
+import OpenEXR
 
 def bilateral_grid_lhe(image, s_spatial=16, num_levels=16):
     """
@@ -91,16 +92,21 @@ def bilateral_grid_lhe(image, s_spatial=16, num_levels=16):
 
 # --- Example Usage Run ---
 if __name__ == "__main__":
-    # Load an RGB image and equalize only its "value" channel in HSV space
-    bgr_img = cv2.imread("run/test.jpg", cv2.IMREAD_COLOR)
-    if bgr_img is None:
-        raise FileNotFoundError("Could not load 'run/test.jpg'")
+    # Load a linear HDR image and equalize its log-luminance only
+    rgb_img = OpenEXR.File("run/ndk.exr").channels()["RGB"].pixels.astype(np.float32)
 
-    # Work in float32 throughout: BGR in [0, 1], HSV with H in [0, 360], S/V in [0, 1]
-    bgr_img = bgr_img.astype(np.float32) / 255.0
+    # Normalize by the single brightest R, G or B sample so every channel lands in [0, 1]
+    rgb_img = np.clip(rgb_img / rgb_img.max(), 0.0, 1.0)
 
-    hsv_img = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2HSV)
-    hue, sat, val = cv2.split(hsv_img)
+    # Luminance via NTSC weights, equalized in the log domain (Mantiuk-style chroma handling)
+    NTSC_WEIGHTS = np.array([0.299, 0.587, 0.114], dtype=np.float32)
+    luminance = np.maximum(rgb_img @ NTSC_WEIGHTS, 1e-6)
+    log_luminance = np.log(luminance)
+
+    # The grid expects [0, 1]; remember the log range so the result maps back onto it
+    log_min = float(log_luminance.min())
+    log_range = float(log_luminance.max()) - log_min
+    norm_log_luminance = (log_luminance - log_min) / log_range
 
     # Interactive controls: trackbars store (value - 1), so the minimum is 1 and 2
     WINDOW = "Bilateral Grid LHE"
@@ -113,16 +119,21 @@ if __name__ == "__main__":
         s_spatial = cv2.getTrackbarPos("s_spatial", WINDOW) + 1
         num_levels = cv2.getTrackbarPos("num_levels", WINDOW) + 2
 
-        # Recompute only when a slider actually moved (each pass takes seconds)
+        # Recompute only when a slider actually moved
         if (s_spatial, num_levels) != params:
             params = (s_spatial, num_levels)
             print(f"Computing s_spatial={s_spatial}, num_levels={num_levels}...")
 
             # Run Local Histogram Equalization on the bilateral grid
-            enhanced_val = bilateral_grid_lhe(val, s_spatial=s_spatial, num_levels=num_levels)
+            enhanced_norm = bilateral_grid_lhe(norm_log_luminance, s_spatial=s_spatial, num_levels=num_levels)
 
-            # Reapply the original hue and saturation
-            enhanced_img = cv2.cvtColor(cv2.merge([hue, sat, enhanced_val]), cv2.COLOR_HSV2BGR)
+            # Undo the log: back to a linear luminance spanning the original range
+            enhanced_luminance = np.exp(enhanced_norm * log_range + log_min)
+
+            # Reapply chroma by keeping each pixel's original ratio to its own luminance
+            enhanced_rgb = rgb_img * (enhanced_luminance / luminance)[:, :, None]
+
+            enhanced_img = np.clip(np.ascontiguousarray(enhanced_rgb[:, :, ::-1]), 0.0, 1.0)
             cv2.imshow(WINDOW, enhanced_img)
 
         # Esc or 'q' quits; 's' saves the currently displayed result
