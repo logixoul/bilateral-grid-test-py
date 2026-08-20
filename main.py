@@ -49,7 +49,7 @@ if __name__ == "__main__":
     cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
 
     # 0 = edge-aware AHE on a bilateral grid, 1 = Mantiuk-style contrast equalization
-    cv2.createTrackbar("operator", WINDOW, 0, 1, lambda v: None)
+    cv2.createTrackbar("operator", WINDOW, 1, 1, lambda v: None)
 
     # AHE: trackbars store (value - 1), so the minimum is 1 and 2
     cv2.createTrackbar("ahe s_spatial", WINDOW, 8 - 1, 64 - 1, lambda v: None)
@@ -63,6 +63,8 @@ if __name__ == "__main__":
     cv2.createTrackbar("mantiuk max_gain", WINDOW, 8 - 1, 32 - 1, lambda v: None)
     # The solver is the slow part; fewer iterations trade accuracy for responsiveness
     cv2.createTrackbar("mantiuk iters", WINDOW, 150, 500, lambda v: None)
+    # Output dynamic range in tenths of a log10 unit; 0 means match the input's range
+    cv2.createTrackbar("mantiuk range x10", WINDOW, 25, 40, lambda v: None)
 
     params = None
     while cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) >= 1:
@@ -71,13 +73,15 @@ if __name__ == "__main__":
         num_levels = cv2.getTrackbarPos("ahe num_levels", WINDOW) + 2
         eps_pos = cv2.getTrackbarPos("ahe guided_eps", WINDOW)
         window_px = max(cv2.getTrackbarPos("ahe window_px", WINDOW), 8)
-        strength = cv2.getTrackbarPos("mantiuk strength", WINDOW) * 10.0 / 100.0
+        strength = cv2.getTrackbarPos("mantiuk strength", WINDOW) / 10.0
         max_gain = cv2.getTrackbarPos("mantiuk max_gain", WINDOW) + 1
         iterations = max(cv2.getTrackbarPos("mantiuk iters", WINDOW), 10)
+        range_pos = cv2.getTrackbarPos("mantiuk range x10", WINDOW)
+        display_range = None if range_pos == 0 else range_pos / 10.0
 
         # Recompute only when a slider actually moved
         current = (operator, s_spatial, num_levels, eps_pos, window_px,
-                   strength, max_gain, iterations)
+                   strength, max_gain, iterations, range_pos)
         if current != params:
             params = current
 
@@ -90,12 +94,14 @@ if __name__ == "__main__":
                                                     num_levels=num_levels, guided_eps=guided_eps,
                                                     window_px=window_px)
             else:
+                shown = "input" if display_range is None else f"{display_range:.1f} log10"
                 print(f"Mantiuk: strength={strength:.2f}, max_gain={max_gain}, "
-                      f"iterations={iterations}...")
+                      f"iterations={iterations}, range={shown}...")
                 enhanced_log = MantiukContrastEqualization.enhance(log_luminance,
                                                                    strength=strength,
                                                                    max_gain=max_gain,
                                                                    iterations=iterations,
+                                                                   display_range=display_range,
                                                                    verbose=True)
 
             enhanced_img = reapply_chroma(rgb_img, luminance, enhanced_log)

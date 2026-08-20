@@ -44,18 +44,23 @@ def _transducer(contrast):
     """
     Response of the visual system to a contrast, in JND units (Eq. 14).
 
-    The analytical approximation to the transducer of Eq. 13, whose defining property is
+    MY OWN analytical approximation to the transducer of Eq. 13, whose defining property is
     that the response changes by one unit per just noticeable difference. Equalizing in
     this space rather than in contrast is what makes "equal magnitude" mean "equally
     visible", and it bounds the gain of Eq. 19 without any need for a cap.
     """
-    return 54.09288 * np.abs(contrast) ** 0.41850
+    eps = 0.0160000008
+    exponent = 0.418500036
+    mul = 0.646000028
+    return ((np.abs(contrast) + eps) ** exponent - eps ** exponent) * mul
 
 
 def _inverse_transducer(response):
     """Back from response to contrast; the inverse of Eq. 14."""
-    return (np.abs(response) / 54.09288) ** (1.0 / 0.41850)
-
+    exponent = 1.62485065711
+    eps = 0.016
+    mul = 4.30666666667
+    return ((np.abs(response) + eps) ** exponent - eps ** exponent) * mul
 
 def _contrast_weights(gx, gy):
     """
@@ -139,6 +144,28 @@ def _apply_A(x, weights):
     return _accumulate_up(terms, [level.shape for level in pyramid])
 
 
+def _diagonal(weights, shapes):
+    """
+    Diagonal of A, for Jacobi preconditioning.
+
+    Probing A with a single pixel gives a closed form: at level k that pixel lands in one
+    cell with coefficient (1/4)^k, and only the edges touching that cell contribute, so
+    its diagonal entry is (1/16)^k times the sum of their weights. Pre-scaling each level
+    by (1/4)^k lets the same coarse-to-fine accumulation as everywhere else supply the
+    other (1/4)^k.
+    """
+    terms = []
+    for level, (px, py), shape in zip(range(len(weights)), weights, shapes):
+        incident = np.zeros(shape, dtype=np.float32)
+        incident[:, :-1] += px
+        incident[:, 1:] += px
+        incident[:-1, :] += py
+        incident[1:, :] += py
+        terms.append(incident * (0.25 ** level))
+
+    return _accumulate_up(terms, shapes)
+
+
 def _right_hand_side(modified, weights, shapes):
     """Right hand side of Eq. 22, built from the modified contrasts."""
     terms = [_contrasts_adjoint(px * gx, py * gy, shape)
@@ -146,19 +173,24 @@ def _right_hand_side(modified, weights, shapes):
     return _accumulate_up(terms, shapes)
 
 
-def _biconjugate_gradient(apply_A, b, iterations, tolerance):
+def _biconjugate_gradient(apply_A, b, diagonal, iterations, tolerance):
     """
-    Biconjugate gradient (Numerical Recipes 2.7), as specified in the paper.
+    Preconditioned biconjugate gradient (Numerical Recipes 2.7), as specified in the paper.
 
     A here is symmetric -- it is the Hessian of a quadratic objective -- so the shadow
     residual tracks the true one and this reduces to conjugate gradients. The two
-    sequences are kept anyway so the method matches the paper's, and so weighted
-    contrasts (non-uniform p in Eq. 7) would not need a different solver.
+    sequences are kept anyway so the method matches the paper's.
+
+    The Eq. 9 weights span nearly two orders of magnitude, which leaves A badly
+    conditioned; dividing by its diagonal (Jacobi preconditioning, the same choice
+    Numerical Recipes makes) is what makes the iteration converge in practice.
 
     A is singular: adding a constant to every pixel changes no contrast. B is orthogonal
     to that null space, so the iteration converges to a solution defined up to an offset,
     which the caller normalizes away.
     """
+    precondition = lambda v: v / diagonal
+
     x = np.zeros_like(b)
     residual = b - apply_A(x)
     shadow = residual.copy()
@@ -168,17 +200,21 @@ def _biconjugate_gradient(apply_A, b, iterations, tolerance):
     b_norm = float(np.linalg.norm(b)) + 1e-12
 
     for iteration in range(iterations):
-        rho = float(np.sum(shadow * residual))
+        z = precondition(residual)
+        # The preconditioner is diagonal, so it is its own transpose
+        shadow_z = precondition(shadow)
+
+        rho = float(np.sum(z * shadow))
         if abs(rho) < 1e-30:
             break
 
         if direction is None:
-            direction = residual.copy()
-            shadow_direction = shadow.copy()
+            direction = z.copy()
+            shadow_direction = shadow_z.copy()
         else:
             beta = rho / rho_previous
-            direction = residual + beta * direction
-            shadow_direction = shadow + beta * shadow_direction
+            direction = z + beta * direction
+            shadow_direction = shadow_z + beta * shadow_direction
 
         q = apply_A(direction)
         denominator = float(np.sum(shadow_direction * q))
@@ -255,9 +291,10 @@ def _equalize_contrasts(pyramid, strength, max_gain, num_bins=1024):
 
 
 def enhance(log_luminance, strength=1.0, max_gain=8.0, levels=None,
-            iterations=150, tolerance=1e-4, verbose=False):
+            iterations=150, tolerance=1e-4, display_range=None, trim_percent=0.5,
+            verbose=False):
     """
-    Equalize contrast. Takes and returns log-luminance in the same range.
+    Equalize contrast. Takes and returns log-luminance.
 
     Parameters:
         strength (float): 0 leaves the image untouched, 1 applies full equalization.
@@ -265,6 +302,11 @@ def enhance(log_luminance, strength=1.0, max_gain=8.0, levels=None,
         levels (int): Pyramid depth; defaults to as deep as the image allows.
         iterations (int): Cap on biconjugate gradient iterations.
         tolerance (float): Relative residual at which the solver stops early.
+        display_range (float): Output dynamic range in log10 units (2.0 = 100:1).
+            Defaults to the input's own range. The operator only fixes contrast up to
+            a scale, so this is the knob that decides how strong the result looks.
+        trim_percent (float): Percentile clipped off each end before rescaling, so a
+            few extreme pixels cannot compress everything else.
     """
     # The paper works in log10 units, and Eq. 19 puts the output on that scale too
     x = (log_luminance / LOG10).astype(np.float32)
@@ -282,12 +324,18 @@ def enhance(log_luminance, strength=1.0, max_gain=8.0, levels=None,
     b = _right_hand_side(modified, weights, shapes)
 
     solution, used, residual = _biconjugate_gradient(
-        lambda v: _apply_A(v, weights), b, iterations, tolerance)
+        lambda v: _apply_A(v, weights), b, _diagonal(weights, shapes), iterations, tolerance)
     if verbose:
         print(f"  biconjugate gradient: {used} iterations, relative residual {residual:.2e}")
 
-    # The solution is defined up to an offset, so put it back on the input's log range
-    out_min, out_max = float(solution.min()), float(solution.max())
+    # The equalized contrasts fix the image only up to a scale, so the output range is a
+    # choice. Pin the median to the input's median and fan contrast out around it:
+    # anchoring either end instead would just slide the whole image dark or bright as
+    # the range widens, rather than adding contrast.
     log_min, log_max = float(log_luminance.min()), float(log_luminance.max())
+    if display_range is None:
+        display_range = (log_max - log_min) / LOG10
 
-    return (solution - out_min) / (out_max - out_min) * (log_max - log_min) + log_min
+    low, mid, high = np.percentile(solution, [trim_percent, 50.0, 100.0 - trim_percent])
+    scaled = (solution - low) / max(high - low, 1e-12)
+    return scaled + float(np.median(log_luminance))
