@@ -57,10 +57,10 @@ def _transducer(contrast):
 
 def _inverse_transducer(response):
     """Back from response to contrast; the inverse of Eq. 14."""
-    exponent = 1.62485065711
-    eps = 0.016
-    mul = 4.30666666667
-    return ((np.abs(response) + eps) ** exponent - eps ** exponent) * mul
+    eps = 0.0160000008
+    exponent = 0.418500036
+    mul = 0.646000028
+    return (np.abs(response) / mul + eps ** exponent) ** (1.0 / exponent) - eps
 
 def _contrast_weights(gx, gy):
     """
