@@ -291,7 +291,7 @@ def _equalize_contrasts(pyramid, strength, max_gain, target_contrast, num_bins=1
 
 def enhance(log_luminance, strength=1.0, max_gain=8.0, levels=None,
             iterations=150, tolerance=1e-4,
-            target_contrast=50.0, verbose=False):
+            target_contrast=50.0, brightness=0.5, verbose=False):
     """
     Equalize contrast. Takes and returns log-luminance.
 

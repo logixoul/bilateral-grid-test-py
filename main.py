@@ -34,7 +34,7 @@ def _smoothstep(edge0, edge1, x):
     # Apply smoothstep formula
     return x * x * (3 - 2 * x)
 
-def reapply_chroma(rgb, luminance, enhanced_log_luminance):
+def reapply_chroma(rgb, luminance, enhanced_log_luminance, brightness=0.5):
     """
     Undo the log and put chroma back, as BGR ready for display.
 
@@ -47,7 +47,7 @@ def reapply_chroma(rgb, luminance, enhanced_log_luminance):
     enhanced_log_luminance01 = (enhanced_log_luminance - low) / (high - low)
     enhanced_log_luminance01 = np.clip(enhanced_log_luminance01, 0.0, 1.0)
 
-    enhanced_luminance = np.exp(enhanced_log_luminance01 * 4.0)
+    enhanced_luminance = np.exp(enhanced_log_luminance01 / (1.0 - brightness))
     trim_percent = 1.0
     low, high = np.percentile(enhanced_luminance, [trim_percent, 100.0 - trim_percent])
     enhanced_luminance01 = (enhanced_luminance - low) / (high - low)
@@ -62,37 +62,41 @@ if __name__ == "__main__":
     log_luminance, luminance = to_log_luminance(rgb_img)
 
     WINDOW = "Local Contrast"
+    WINDOW_AHE = "AHE"
     cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
+    cv2.namedWindow(WINDOW_AHE, cv2.WINDOW_NORMAL)
 
     # 0 = edge-aware AHE on a bilateral grid, 1 = Mantiuk-style contrast equalization
-    cv2.createTrackbar("operator", WINDOW, 1, 1, lambda v: None)
+    cv2.createTrackbar("operator", WINDOW_AHE, 1, 1, lambda v: None)
 
     # AHE: trackbars store (value - 1), so the minimum is 1 and 2
-    cv2.createTrackbar("ahe s_spatial", WINDOW, 8 - 1, 64 - 1, lambda v: None)
-    cv2.createTrackbar("ahe num_levels", WINDOW, 32 - 2, 64 - 2, lambda v: None)
+    cv2.createTrackbar("ahe s_spatial", WINDOW_AHE, 8 - 1, 64 - 1, lambda v: None)
+    cv2.createTrackbar("ahe num_levels", WINDOW_AHE, 32 - 2, 64 - 2, lambda v: None)
     # Guided blur off at 0, otherwise eps sweeps 1e-4 .. 1e-1 logarithmically
-    cv2.createTrackbar("ahe guided_eps", WINDOW, 1, 100, lambda v: None)
-    cv2.createTrackbar("ahe window_px", WINDOW, 112, 400, lambda v: None)
+    cv2.createTrackbar("ahe guided_eps", WINDOW_AHE, 1, 100, lambda v: None)
+    cv2.createTrackbar("ahe window_px", WINDOW_AHE, 112, 400, lambda v: None)
 
     # Mantiuk: strength as a percentage, gain ceiling stored as (value - 1)
     cv2.createTrackbar("mantiuk strength", WINDOW, 100, 100, lambda v: None)
     # The solver is the slow part; fewer iterations trade accuracy for responsiveness
     cv2.createTrackbar("mantiuk iters", WINDOW, 50, 500, lambda v: None)
     cv2.createTrackbar("mantiuk target contrast", WINDOW, 0, 500, lambda v: None)
+    cv2.createTrackbar("mantiuk brightness", WINDOW, 0, 500, lambda v: None)
 
     params = None
     while cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) >= 1:
-        operator = cv2.getTrackbarPos("operator", WINDOW)
-        s_spatial = cv2.getTrackbarPos("ahe s_spatial", WINDOW) + 1
-        num_levels = cv2.getTrackbarPos("ahe num_levels", WINDOW) + 2
-        eps_pos = cv2.getTrackbarPos("ahe guided_eps", WINDOW)
-        window_px = max(cv2.getTrackbarPos("ahe window_px", WINDOW), 8)
+        operator = cv2.getTrackbarPos("operator", WINDOW_AHE)
+        s_spatial = cv2.getTrackbarPos("ahe s_spatial", WINDOW_AHE) + 1
+        num_levels = cv2.getTrackbarPos("ahe num_levels", WINDOW_AHE) + 2
+        eps_pos = cv2.getTrackbarPos("ahe guided_eps", WINDOW_AHE)
+        window_px = max(cv2.getTrackbarPos("ahe window_px", WINDOW_AHE), 8)
         strength = cv2.getTrackbarPos("mantiuk strength", WINDOW) / 10.0
         iterations = max(cv2.getTrackbarPos("mantiuk iters", WINDOW), 10)
         target_contrast = (cv2.getTrackbarPos("mantiuk target contrast", WINDOW) + 1) / (5000.0 + 1.0)
+        brightness = (cv2.getTrackbarPos("mantiuk brightness", WINDOW) + 1) / (500.0 + 1.0)
         # Recompute only when a slider actually moved
         current = (operator, s_spatial, num_levels, eps_pos, window_px,
-                   strength, iterations, target_contrast)
+                   strength, iterations, target_contrast, brightness)
         if current != params:
             params = current
 
@@ -113,7 +117,7 @@ if __name__ == "__main__":
                                                                    target_contrast=target_contrast,
                                                                    verbose=True)
 
-            enhanced_img = reapply_chroma(rgb_img, luminance, enhanced_log)
+            enhanced_img = reapply_chroma(rgb_img, luminance, enhanced_log, brightness)
             
             cv2.imshow(WINDOW, enhanced_img)
 
