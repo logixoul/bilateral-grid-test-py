@@ -17,18 +17,19 @@ def bilateral_grid_lhe(image, s_spatial=16, num_levels=16):
     grid_w = int(np.ceil(w / s_spatial))
     grid_d = num_levels
 
+    # Floating point grid coordinates of every pixel, shared by splat and slice
+    fx = np.arange(w, dtype=np.float32) / s_spatial
+    fy = np.arange(h, dtype=np.float32) / s_spatial
+    fz = image * grid_d
+
     # 2. Splatting: Populate the 3D local histogram grid
     # Each grid cell (z, y, x) acts as a local histogram bin
     grid = np.zeros((grid_d, grid_h, grid_w), dtype=np.float32)
 
-    for y in range(h):
-        for x in range(w):
-            intensity = image[y, x]
-            # Map pixel coordinates to grid coordinates
-            gx = min(int(x / s_spatial), grid_w - 1)
-            gy = min(int(y / s_spatial), grid_h - 1)
-            gz = min(int(intensity * grid_d), grid_d - 1)
-            grid[gz, gy, gx] += 1.0
+    gx = np.minimum(fx.astype(np.int32), grid_w - 1)
+    gy = np.minimum(fy.astype(np.int32), grid_h - 1)
+    gz = np.minimum(fz.astype(np.int32), grid_d - 1)
+    np.add.at(grid, (gz, gy[:, None], gx[None, :]), 1.0)
 
     # 3. Blurring: Smooth the histograms spatially to prevent blocking artifacts
     # We blur each intensity slice independently using a Gaussian filter
@@ -46,63 +47,52 @@ def bilateral_grid_lhe(image, s_spatial=16, num_levels=16):
     normalized_cdf_grid = (cdf_grid / total_pixels_grid).astype(np.float32)
 
     # 5. Slicing: Sample the 3D CDF back onto the 2D image coordinates
-    output_image = np.zeros_like(image, dtype=np.float32)
+    # Truncate index boundaries safely for trilinear interpolation
+    x0 = fx.astype(np.int32)
+    x1 = np.minimum(x0 + 1, grid_w - 1)
+    y0 = fy.astype(np.int32)
+    y1 = np.minimum(y0 + 1, grid_h - 1)
+    z0 = np.minimum(fz.astype(np.int32), grid_d - 1)
+    z1 = np.minimum(z0 + 1, grid_d - 1)
 
-    for y in range(h):
-        for x in range(w):
-            intensity = image[y, x]
+    # Compute interpolation weights
+    wx = (fx - x0)[None, :]
+    wy = (fy - y0)[:, None]
+    wz = fz - z0
 
-            # Find the floating point positions in the grid
-            fx = x / s_spatial
-            fy = y / s_spatial
-            fz = intensity * grid_d
+    # Broadcast the per-axis indices into full (h, w) gather patterns
+    x0, x1 = x0[None, :], x1[None, :]
+    y0, y1 = y0[:, None], y1[:, None]
 
-            # Truncate index boundaries safely for trilinear interpolation
-            x0 = int(np.floor(fx))
-            x1 = min(x0 + 1, grid_w - 1)
-            y0 = int(np.floor(fy))
-            y1 = min(y0 + 1, grid_h - 1)
-            z0 = min(int(np.floor(fz)), grid_d - 1)
-            z1 = min(z0 + 1, grid_d - 1)
+    # Trilinear Interpolation of CDF values
+    c000 = normalized_cdf_grid[z0, y0, x0]
+    c001 = normalized_cdf_grid[z0, y0, x1]
+    c010 = normalized_cdf_grid[z0, y1, x0]
+    c011 = normalized_cdf_grid[z0, y1, x1]
+    c100 = normalized_cdf_grid[z1, y0, x0]
+    c101 = normalized_cdf_grid[z1, y0, x1]
+    c110 = normalized_cdf_grid[z1, y1, x0]
+    c111 = normalized_cdf_grid[z1, y1, x1]
 
-            # Compute interpolation weights
-            wx = fx - x0
-            wy = fy - y0
-            wz = fz - z0
+    # Interpolate X axis
+    c00 = c000 * (1 - wx) + c001 * wx
+    c01 = c010 * (1 - wx) + c011 * wx
+    c10 = c100 * (1 - wx) + c101 * wx
+    c11 = c110 * (1 - wx) + c111 * wx
 
-            # Trilinear Interpolation of CDF values
-            c000 = normalized_cdf_grid[z0, y0, x0]
-            c001 = normalized_cdf_grid[z0, y0, x1]
-            c010 = normalized_cdf_grid[z0, y1, x0]
-            c011 = normalized_cdf_grid[z0, y1, x1]
-            c100 = normalized_cdf_grid[z1, y0, x0]
-            c101 = normalized_cdf_grid[z1, y0, x1]
-            c110 = normalized_cdf_grid[z1, y1, x0]
-            c111 = normalized_cdf_grid[z1, y1, x1]
+    # Interpolate Y axis
+    c0 = c00 * (1 - wy) + c01 * wy
+    c1 = c10 * (1 - wy) + c11 * wy
 
-            # Interpolate X axis
-            c00 = c000 * (1 - wx) + c001 * wx
-            c01 = c010 * (1 - wx) + c011 * wx
-            c10 = c100 * (1 - wx) + c101 * wx
-            c11 = c110 * (1 - wx) + c111 * wx
+    # Interpolate Z axis: the normalized CDF (0.0 to 1.0) is already the output value
+    output_image = c0 * (1 - wz) + c1 * wz
 
-            # Interpolate Y axis
-            c0 = c00 * (1 - wy) + c01 * wy
-            c1 = c10 * (1 - wy) + c11 * wy
-
-            # Interpolate Z axis
-            interpolated_cdf = c0 * (1 - wz) + c1 * wz
-
-            # The normalized CDF (0.0 to 1.0) is already the output value
-            output_image[y, x] = interpolated_cdf
-
-    return np.clip(output_image, 0.0, 1.0)
+    return np.clip(output_image, 0.0, 1.0).astype(np.float32)
 
 # --- Example Usage Run ---
 if __name__ == "__main__":
     # Load an RGB image and equalize only its "value" channel in HSV space
     bgr_img = cv2.imread("run/test.jpg", cv2.IMREAD_COLOR)
-    bgr_img = cv2.resize(bgr_img, dsize=None, fx=.5, fy=.5, interpolation=cv2.INTER_AREA)  # Resize for faster processing
     if bgr_img is None:
         raise FileNotFoundError("Could not load 'run/test.jpg'")
 
@@ -112,13 +102,35 @@ if __name__ == "__main__":
     hsv_img = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2HSV)
     hue, sat, val = cv2.split(hsv_img)
 
-    # Run Local Histogram Equalization on the bilateral grid
-    enhanced_val = bilateral_grid_lhe(val, s_spatial=16, num_levels=16)
+    # Interactive controls: trackbars store (value - 1), so the minimum is 1 and 2
+    WINDOW = "Bilateral Grid LHE"
+    cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
+    cv2.createTrackbar("s_spatial", WINDOW, 16 - 1, 64 - 1, lambda v: None)
+    cv2.createTrackbar("num_levels", WINDOW, 16 - 2, 64 - 2, lambda v: None)
 
-    # Reapply the original hue and saturation
-    enhanced_img = cv2.cvtColor(cv2.merge([hue, sat, enhanced_val]), cv2.COLOR_HSV2BGR)
+    params = None
+    while cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) >= 1:
+        s_spatial = cv2.getTrackbarPos("s_spatial", WINDOW) + 1
+        num_levels = cv2.getTrackbarPos("num_levels", WINDOW) + 2
 
-    # Save output to inspect contrast adaptation near boundaries
-    cv2.imshow("result", np.clip(enhanced_img * 255.0, 0, 255).astype(np.uint8))
-    cv2.waitKey(0)
+        # Recompute only when a slider actually moved (each pass takes seconds)
+        if (s_spatial, num_levels) != params:
+            params = (s_spatial, num_levels)
+            print(f"Computing s_spatial={s_spatial}, num_levels={num_levels}...")
+
+            # Run Local Histogram Equalization on the bilateral grid
+            enhanced_val = bilateral_grid_lhe(val, s_spatial=s_spatial, num_levels=num_levels)
+
+            # Reapply the original hue and saturation
+            enhanced_img = cv2.cvtColor(cv2.merge([hue, sat, enhanced_val]), cv2.COLOR_HSV2BGR)
+            cv2.imshow(WINDOW, enhanced_img)
+
+        # Esc or 'q' quits; 's' saves the currently displayed result
+        key = cv2.waitKey(30) & 0xFF
+        if key in (27, ord("q")):
+            break
+        if key == ord("s"):
+            cv2.imwrite("run/output_enhanced.png", np.clip(enhanced_img * 255.0, 0, 255).astype(np.uint8))
+            print("Saved 'run/output_enhanced.png'")
+
     cv2.destroyAllWindows()
