@@ -289,7 +289,6 @@ def _equalize_contrasts(pyramid, strength, max_gain, num_bins=1024):
 
     return modified
 
-
 def enhance(log_luminance, strength=1.0, max_gain=8.0, levels=None,
             iterations=150, tolerance=1e-4, display_range=None, trim_percent=0.5,
             verbose=False):
@@ -338,4 +337,4 @@ def enhance(log_luminance, strength=1.0, max_gain=8.0, levels=None,
 
     low, mid, high = np.percentile(solution, [trim_percent, 50.0, 100.0 - trim_percent])
     scaled = (solution - low) / max(high - low, 1e-12)
-    return scaled + float(np.median(log_luminance))
+    return scaled

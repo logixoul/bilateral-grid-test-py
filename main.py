@@ -27,6 +27,11 @@ def to_log_luminance(rgb):
     luminance = np.maximum(rgb @ NTSC_WEIGHTS, 1e-6)
     return np.log(luminance), luminance
 
+def _smoothstep(edge0, edge1, x):
+    # Scale, clamp and check limits
+    x = np.clip((x - edge0) / (edge1 - edge0), 0.0, 1.0)
+    # Apply smoothstep formula
+    return x * x * (3 - 2 * x)
 
 def reapply_chroma(rgb, luminance, enhanced_log_luminance):
     """
@@ -34,9 +39,19 @@ def reapply_chroma(rgb, luminance, enhanced_log_luminance):
 
     Each pixel keeps its original ratio to its own luminance, so only brightness is
     changed by the operator -- hue and saturation ride along untouched.
+
+    Fine tuned normalization behavior for maximal visual impact - do not change unless you know what you are doing.
     """
-    enhanced_luminance = np.exp(enhanced_log_luminance)
-    enhanced_rgb = rgb * (enhanced_luminance / luminance)[:, :, None]
+    low, high = np.percentile(enhanced_log_luminance, [0.0, 100.0])
+    enhanced_log_luminance01 = (enhanced_log_luminance - low) / (high - low)
+    enhanced_log_luminance01 = np.clip(enhanced_log_luminance01, 0.0, 1.0)
+
+    enhanced_luminance = np.exp(enhanced_log_luminance01)
+    trim_percent = 1.0
+    low, high = np.percentile(enhanced_luminance, [trim_percent, 100.0 - trim_percent])
+    enhanced_luminance01 = (enhanced_luminance - low) / (high - low)
+    enhanced_luminance01 = np.clip(enhanced_luminance01, 0.0, 1.0)
+    enhanced_rgb = rgb * (enhanced_luminance01 / luminance)[:, :, None]
 
     return np.clip(np.ascontiguousarray(enhanced_rgb[:, :, ::-1]), 0.0, 1.0)
 
@@ -105,6 +120,7 @@ if __name__ == "__main__":
                                                                    verbose=True)
 
             enhanced_img = reapply_chroma(rgb_img, luminance, enhanced_log)
+            
             cv2.imshow(WINDOW, enhanced_img)
 
         # Esc or 'q' quits; 's' saves the currently displayed result
