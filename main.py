@@ -18,7 +18,8 @@ NTSC_WEIGHTS = np.array([0.299, 0.587, 0.114], dtype=np.float32)
 def load_linear_rgb(path):
     """Load a linear HDR image, normalized by its single brightest R, G or B sample."""
     rgb = OpenEXR.File(path).channels()["RGB"].pixels.astype(np.float32)
-    rgb = cv2.resize(rgb, dsize=None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
+    scale_factor = 1000 / rgb.shape[1]  # scale to 1000px wide for speed
+    rgb = cv2.resize(rgb, dsize=None, fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_AREA)
     return np.clip(rgb / rgb.max(), 0.0, 1.0)
 
 
@@ -46,7 +47,7 @@ def reapply_chroma(rgb, luminance, enhanced_log_luminance):
     enhanced_log_luminance01 = (enhanced_log_luminance - low) / (high - low)
     enhanced_log_luminance01 = np.clip(enhanced_log_luminance01, 0.0, 1.0)
 
-    enhanced_luminance = np.exp(enhanced_log_luminance01)
+    enhanced_luminance = np.exp(enhanced_log_luminance01 * 4.0)
     trim_percent = 1.0
     low, high = np.percentile(enhanced_luminance, [trim_percent, 100.0 - trim_percent])
     enhanced_luminance01 = (enhanced_luminance - low) / (high - low)
@@ -77,6 +78,7 @@ if __name__ == "__main__":
     cv2.createTrackbar("mantiuk strength", WINDOW, 100, 100, lambda v: None)
     # The solver is the slow part; fewer iterations trade accuracy for responsiveness
     cv2.createTrackbar("mantiuk iters", WINDOW, 50, 500, lambda v: None)
+    cv2.createTrackbar("mantiuk target contrast", WINDOW, 0, 500, lambda v: None)
 
     params = None
     while cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) >= 1:
@@ -87,10 +89,10 @@ if __name__ == "__main__":
         window_px = max(cv2.getTrackbarPos("ahe window_px", WINDOW), 8)
         strength = cv2.getTrackbarPos("mantiuk strength", WINDOW) / 10.0
         iterations = max(cv2.getTrackbarPos("mantiuk iters", WINDOW), 10)
-
+        target_contrast = (cv2.getTrackbarPos("mantiuk target contrast", WINDOW) + 1) / (5000.0 + 1.0)
         # Recompute only when a slider actually moved
         current = (operator, s_spatial, num_levels, eps_pos, window_px,
-                   strength, iterations)
+                   strength, iterations, target_contrast)
         if current != params:
             params = current
 
@@ -104,10 +106,11 @@ if __name__ == "__main__":
                                                     window_px=window_px)
             else:
                 print(f"Mantiuk: strength={strength:.2f}, "
-                      f"iterations={iterations}...")
+                      f"iterations={iterations}, target_contrast={target_contrast:.2f}...")
                 enhanced_log = MantiukContrastEqualization.enhance(log_luminance,
                                                                    strength=strength,
                                                                    iterations=iterations,
+                                                                   target_contrast=target_contrast,
                                                                    verbose=True)
 
             enhanced_img = reapply_chroma(rgb_img, luminance, enhanced_log)

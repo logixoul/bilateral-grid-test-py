@@ -235,7 +235,7 @@ def _biconjugate_gradient(apply_A, b, diagonal, iterations, tolerance):
     return x, iteration + 1, float(np.linalg.norm(residual)) / b_norm
 
 
-def _equalize_contrasts(pyramid, strength, max_gain, num_bins=1024):
+def _equalize_contrasts(pyramid, strength, max_gain, target_contrast, num_bins=1024):
     """
     Equalize the histogram of contrast magnitudes in response space (Eq. 17-19).
 
@@ -274,15 +274,15 @@ def _equalize_contrasts(pyramid, strength, max_gain, num_bins=1024):
     centers = ((edges[:-1] + edges[1:]) / 2.0).astype(np.float32)
     gain_table = np.divide(cdf, centers, out=np.zeros_like(centers), where=centers > 0)
     gain_table = 1.0 + strength * (np.clip(gain_table, 0.0, max_gain) - 1.0)
-
+    
     modified = []
     for rx, ry, magnitude in levels:
         gain = np.interp(magnitude, centers, gain_table).astype(np.float32)
 
         # A pair is shared by two pixels with two different gains. Both appear in the
         # objective, and a least-squares fit to both equals a single fit to their mean.
-        rx = rx * (gain[:, :-1] + gain[:, 1:]) / 2.0
-        ry = ry * (gain[:-1, :] + gain[1:, :]) / 2.0
+        rx = target_contrast * rx * (gain[:, :-1] + gain[:, 1:]) / 2.0
+        ry = target_contrast * ry * (gain[:-1, :] + gain[1:, :]) / 2.0
 
         modified.append((np.sign(rx) * _inverse_transducer(rx),
                          np.sign(ry) * _inverse_transducer(ry)))
@@ -290,8 +290,8 @@ def _equalize_contrasts(pyramid, strength, max_gain, num_bins=1024):
     return modified
 
 def enhance(log_luminance, strength=1.0, max_gain=8.0, levels=None,
-            iterations=150, tolerance=1e-4, display_range=None, trim_percent=0.5,
-            verbose=False):
+            iterations=150, tolerance=1e-4,
+            target_contrast=50.0, verbose=False):
     """
     Equalize contrast. Takes and returns log-luminance.
 
@@ -301,11 +301,8 @@ def enhance(log_luminance, strength=1.0, max_gain=8.0, levels=None,
         levels (int): Pyramid depth; defaults to as deep as the image allows.
         iterations (int): Cap on biconjugate gradient iterations.
         tolerance (float): Relative residual at which the solver stops early.
-        display_range (float): Output dynamic range in log10 units (2.0 = 100:1).
-            Defaults to the input's own range. The operator only fixes contrast up to
-            a scale, so this is the knob that decides how strong the result looks.
-        trim_percent (float): Percentile clipped off each end before rescaling, so a
-            few extreme pixels cannot compress everything else.
+        target_contrast (float): Target contrast for the equalization.
+        verbose (bool): Whether to print progress information.
     """
     # The paper works in log10 units, and Eq. 19 puts the output on that scale too
     x = (log_luminance / LOG10).astype(np.float32)
@@ -319,7 +316,7 @@ def enhance(log_luminance, strength=1.0, max_gain=8.0, levels=None,
     # Weights come from the ORIGINAL contrasts, as in Eq. 8
     weights = [_contrast_weights(*_contrasts(level)) for level in pyramid]
 
-    modified = _equalize_contrasts(pyramid, strength, max_gain)
+    modified = _equalize_contrasts(pyramid, strength, max_gain, target_contrast)
     b = _right_hand_side(modified, weights, shapes)
 
     solution, used, residual = _biconjugate_gradient(
@@ -327,14 +324,4 @@ def enhance(log_luminance, strength=1.0, max_gain=8.0, levels=None,
     if verbose:
         print(f"  biconjugate gradient: {used} iterations, relative residual {residual:.2e}")
 
-    # The equalized contrasts fix the image only up to a scale, so the output range is a
-    # choice. Pin the median to the input's median and fan contrast out around it:
-    # anchoring either end instead would just slide the whole image dark or bright as
-    # the range widens, rather than adding contrast.
-    log_min, log_max = float(log_luminance.min()), float(log_luminance.max())
-    if display_range is None:
-        display_range = (log_max - log_min) / LOG10
-
-    low, mid, high = np.percentile(solution, [trim_percent, 50.0, 100.0 - trim_percent])
-    scaled = (solution - low) / max(high - low, 1e-12)
-    return scaled
+    return solution
