@@ -39,6 +39,9 @@ def _discrimination_threshold(contrast):
     """
     return 0.038737 * contrast ** 0.537756
 
+TRANSDUCER_EPS = 0.0160000008
+TRANSDUCER_EXPONENT = 0.418500036
+TRANSDUCER_MUL = 0.646000028
 
 def _transducer(contrast):
     """
@@ -49,18 +52,12 @@ def _transducer(contrast):
     this space rather than in contrast is what makes "equal magnitude" mean "equally
     visible", and it bounds the gain of Eq. 19 without any need for a cap.
     """
-    eps = 0.0160000008
-    exponent = 0.418500036
-    mul = 0.646000028
-    return ((np.abs(contrast) + eps) ** exponent - eps ** exponent) * mul
+    return ((np.abs(contrast) + TRANSDUCER_EPS) ** TRANSDUCER_EXPONENT - TRANSDUCER_EPS ** TRANSDUCER_EXPONENT) * TRANSDUCER_MUL
 
 
 def _inverse_transducer(response):
     """Back from response to contrast; the inverse of Eq. 14."""
-    eps = 0.0160000008
-    exponent = 0.418500036
-    mul = 0.646000028
-    return (np.abs(response) / mul + eps ** exponent) ** (1.0 / exponent) - eps
+    return (np.abs(response) / TRANSDUCER_MUL + TRANSDUCER_EPS ** TRANSDUCER_EXPONENT) ** (1.0 / TRANSDUCER_EXPONENT) - TRANSDUCER_EPS
 
 def _contrast_weights(gx, gy):
     """
