@@ -2,7 +2,34 @@ import numpy as np
 import cv2
 import OpenEXR
 
-def bilateral_grid_lhe(image, s_spatial=16, num_levels=16):
+def _guided_slice_blur(grid, guide, radius, eps):
+    """
+    Edge-aware replacement for the per-slice Gaussian blur (He et al. guided filter).
+
+    Every intensity slice is filtered with the SAME guide (the log-luminance at grid
+    resolution), so a cell's histogram is gathered mostly from cells on its own side
+    of an edge instead of from a fixed round window. `eps` plays the role of a range
+    sigma: small values follow edges tightly, large values degrade to a box blur.
+    """
+    ksize = (2 * int(radius) + 1, 2 * int(radius) + 1)
+    box = lambda a: cv2.boxFilter(a, -1, ksize)
+
+    mean_g = box(guide)
+    var_g = box(guide * guide) - mean_g * mean_g
+
+    blurred = np.empty_like(grid)
+    for z in range(grid.shape[0]):
+        mean_p = box(grid[z])
+        cov_gp = box(guide * grid[z]) - mean_g * mean_p
+        a = cov_gp / (var_g + eps)
+        b = mean_p - a * mean_g
+        blurred[z] = box(a) * guide + box(b)
+
+    # Guided-filter weights can go slightly negative; clamp so the CDF stays monotonic
+    return np.maximum(blurred, 0.0)
+
+
+def bilateral_grid_lhe(image, s_spatial=16, num_levels=16, guided_eps=None):
     """
     Performs Local Histogram Equalization using a 3D Bilateral Grid.
 
@@ -10,6 +37,8 @@ def bilateral_grid_lhe(image, s_spatial=16, num_levels=16):
         image (ndarray): Grayscale float32 input image normalized between 0.0 and 1.0.
         s_spatial (int): Spatial downsampling factor (Grid width/height step).
         num_levels (int): Number of intensity bins in the grid (Grid depth).
+        guided_eps (float): If set, blur the slices with an edge-aware guided filter
+            of this regularization instead of a Gaussian (halo suppression).
     """
     h, w = image.shape
 
@@ -33,12 +62,18 @@ def bilateral_grid_lhe(image, s_spatial=16, num_levels=16):
     np.add.at(grid, (gz, gy[:, None], gx[None, :]), 1.0)
 
     # 3. Blurring: Smooth the histograms spatially to prevent blocking artifacts
-    # We blur each intensity slice independently using a Gaussian filter
-    blurred_grid = np.zeros_like(grid)
-    for z in range(grid_d):
-        # Match sigma to spatial sampling rate to maintain uniform support
-        sigma = s_spatial / 2.0
-        blurred_grid[z, :, :] = cv2.GaussianBlur(grid[z, :, :], (0, 0), sigmaX=sigma, sigmaY=sigma)
+    # Match support to the spatial sampling rate to keep the window uniform
+    sigma = s_spatial / 2.0
+
+    if guided_eps is None:
+        # We blur each intensity slice independently using a Gaussian filter
+        blurred_grid = np.zeros_like(grid)
+        for z in range(grid_d):
+            blurred_grid[z, :, :] = cv2.GaussianBlur(grid[z, :, :], (0, 0), sigmaX=sigma, sigmaY=sigma)
+    else:
+        # Same support, but the window now follows edges instead of being round
+        guide = cv2.resize(image, (grid_w, grid_h), interpolation=cv2.INTER_AREA)
+        blurred_grid = _guided_slice_blur(grid, guide, radius=sigma, eps=guided_eps)
 
     # 4. Compute Cumulative Histograms (CDF) along the intensity axis (Z)
     cdf_grid = np.cumsum(blurred_grid, axis=0)
@@ -113,19 +148,25 @@ if __name__ == "__main__":
     cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
     cv2.createTrackbar("s_spatial", WINDOW, 16 - 1, 64 - 1, lambda v: None)
     cv2.createTrackbar("num_levels", WINDOW, 16 - 2, 64 - 2, lambda v: None)
+    # Guided blur off at 0, otherwise eps sweeps 1e-4 .. 1e-1 logarithmically
+    cv2.createTrackbar("guided_eps", WINDOW, 0, 100, lambda v: None)
 
     params = None
     while cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) >= 1:
         s_spatial = cv2.getTrackbarPos("s_spatial", WINDOW) + 1
         num_levels = cv2.getTrackbarPos("num_levels", WINDOW) + 2
+        eps_pos = cv2.getTrackbarPos("guided_eps", WINDOW)
+        guided_eps = None if eps_pos == 0 else 10.0 ** (-4.0 + 3.0 * (eps_pos - 1) / 99.0)
 
         # Recompute only when a slider actually moved
-        if (s_spatial, num_levels) != params:
-            params = (s_spatial, num_levels)
-            print(f"Computing s_spatial={s_spatial}, num_levels={num_levels}...")
+        if (s_spatial, num_levels, eps_pos) != params:
+            params = (s_spatial, num_levels, eps_pos)
+            blur = "gaussian" if guided_eps is None else f"guided eps={guided_eps:.5f}"
+            print(f"Computing s_spatial={s_spatial}, num_levels={num_levels}, {blur}...")
 
             # Run Local Histogram Equalization on the bilateral grid
-            enhanced_norm = bilateral_grid_lhe(norm_log_luminance, s_spatial=s_spatial, num_levels=num_levels)
+            enhanced_norm = bilateral_grid_lhe(norm_log_luminance, s_spatial=s_spatial,
+                                               num_levels=num_levels, guided_eps=guided_eps)
 
             # Undo the log: back to a linear luminance spanning the original range
             enhanced_luminance = np.exp(enhanced_norm * log_range + log_min)
