@@ -75,11 +75,8 @@ if __name__ == "__main__":
 
     # Mantiuk: strength as a percentage, gain ceiling stored as (value - 1)
     cv2.createTrackbar("mantiuk strength", WINDOW, 100, 100, lambda v: None)
-    cv2.createTrackbar("mantiuk max_gain", WINDOW, 8 - 1, 32 - 1, lambda v: None)
     # The solver is the slow part; fewer iterations trade accuracy for responsiveness
-    cv2.createTrackbar("mantiuk iters", WINDOW, 150, 500, lambda v: None)
-    # Output dynamic range in tenths of a log10 unit; 0 means match the input's range
-    cv2.createTrackbar("mantiuk range x10", WINDOW, 25, 40, lambda v: None)
+    cv2.createTrackbar("mantiuk iters", WINDOW, 50, 500, lambda v: None)
 
     params = None
     while cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) >= 1:
@@ -89,14 +86,11 @@ if __name__ == "__main__":
         eps_pos = cv2.getTrackbarPos("ahe guided_eps", WINDOW)
         window_px = max(cv2.getTrackbarPos("ahe window_px", WINDOW), 8)
         strength = cv2.getTrackbarPos("mantiuk strength", WINDOW) / 10.0
-        max_gain = cv2.getTrackbarPos("mantiuk max_gain", WINDOW) + 1
         iterations = max(cv2.getTrackbarPos("mantiuk iters", WINDOW), 10)
-        range_pos = cv2.getTrackbarPos("mantiuk range x10", WINDOW)
-        display_range = None if range_pos == 0 else range_pos / 10.0
 
         # Recompute only when a slider actually moved
         current = (operator, s_spatial, num_levels, eps_pos, window_px,
-                   strength, max_gain, iterations, range_pos)
+                   strength, iterations)
         if current != params:
             params = current
 
@@ -109,14 +103,11 @@ if __name__ == "__main__":
                                                     num_levels=num_levels, guided_eps=guided_eps,
                                                     window_px=window_px)
             else:
-                shown = "input" if display_range is None else f"{display_range:.1f} log10"
-                print(f"Mantiuk: strength={strength:.2f}, max_gain={max_gain}, "
-                      f"iterations={iterations}, range={shown}...")
+                print(f"Mantiuk: strength={strength:.2f}, "
+                      f"iterations={iterations}...")
                 enhanced_log = MantiukContrastEqualization.enhance(log_luminance,
                                                                    strength=strength,
-                                                                   max_gain=max_gain,
                                                                    iterations=iterations,
-                                                                   display_range=display_range,
                                                                    verbose=True)
 
             enhanced_img = reapply_chroma(rgb_img, luminance, enhanced_log)
