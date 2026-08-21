@@ -18,7 +18,6 @@ import dearpygui.dearpygui as dpg
 
 import image_io
 
-import EdgeAwareAHE
 import EdgeAwareAHE2
 import MantiukContrastEqualization
 
@@ -104,8 +103,7 @@ state = {}
 
 def build_controls():
     """Every knob, grouped. Values are read off the widgets when recomputing."""
-    dpg.add_radio_button(("Mantiuk contrast equalization", "Edge-aware AHE",
-                          "Edge-aware AHE 2 (local CDF)"),
+    dpg.add_radio_button(("Mantiuk contrast equalization", "Edge-aware AHE (local CDF)"),
                          tag="operator", default_value="Mantiuk contrast equalization")
 
     with dpg.collapsing_header(label="Mantiuk", default_open=True):
@@ -131,17 +129,6 @@ def build_controls():
         dpg.add_text("", tag="transducer_values", wrap=PANEL_WIDTH - 30)
 
     with dpg.collapsing_header(label="Edge-aware AHE", default_open=False):
-        dpg.add_slider_int(label="s_spatial", tag="s_spatial", default_value=8,
-                           min_value=1, max_value=64)
-        dpg.add_slider_int(label="num_levels", tag="num_levels", default_value=32,
-                           min_value=2, max_value=64)
-        dpg.add_slider_int(label="window px", tag="window_px", default_value=112,
-                           min_value=8, max_value=400)
-        dpg.add_checkbox(label="edge-aware blur", tag="guided", default_value=True)
-        dpg.add_slider_float(label="log10 eps", tag="guided_eps", default_value=-4.0,
-                             min_value=-4.0, max_value=-1.0)
-
-    with dpg.collapsing_header(label="Edge-aware AHE 2", default_open=False):
         dpg.add_slider_int(label="levels", tag="cdf_levels", default_value=48,
                            min_value=8, max_value=96)
         dpg.add_slider_float(label="sigma spatial", tag="cdf_sigma_spatial",
@@ -158,8 +145,7 @@ def build_controls():
 
 
 CONTROLS = ("operator", "strength", "iterations", "target_contrast", "brightness",
-            "t_eps", "t_exponent", "t_mul", "s_spatial", "num_levels", "window_px",
-            "guided", "guided_eps", "times", "saturation",
+            "t_eps", "t_exponent", "t_mul", "times", "saturation",
             "cdf_levels", "cdf_sigma_spatial", "cdf_sigma_range")
 
 
@@ -201,20 +187,12 @@ def recompute():
                 iterations=dpg.get_value("iterations"),
                 target_contrast=dpg.get_value("target_contrast"),
                 verbose=False)
-    elif dpg.get_value("operator").endswith("(local CDF)"):
+    else:
         enhanced_log = EdgeAwareAHE2.enhance(
             state["log_luminance"],
             num_levels=dpg.get_value("cdf_levels"),
             sigma_spatial=dpg.get_value("cdf_sigma_spatial"),
             sigma_range=dpg.get_value("cdf_sigma_range"))
-    else:
-        guided_eps = 10.0 ** dpg.get_value("guided_eps") if dpg.get_value("guided") else None
-        enhanced_log = EdgeAwareAHE.enhance(
-            state["log_luminance"],
-            s_spatial=dpg.get_value("s_spatial"),
-            num_levels=dpg.get_value("num_levels"),
-            guided_eps=guided_eps,
-            window_px=dpg.get_value("window_px"))
 
     bgr = reapply_chroma(state["rgb"], state["luminance"], enhanced_log,
                          dpg.get_value("brightness"))
