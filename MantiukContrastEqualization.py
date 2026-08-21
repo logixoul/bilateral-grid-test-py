@@ -53,11 +53,16 @@ def _transducer(contrast):
     visible", and it bounds the gain of Eq. 19 without any need for a cap.
     """
     return ((np.abs(contrast) + TRANSDUCER_EPS) ** TRANSDUCER_EXPONENT - TRANSDUCER_EPS ** TRANSDUCER_EXPONENT) * TRANSDUCER_MUL
-
+    #acontrast = np.abs(contrast)
+    #return acontrast / (acontrast + 1.0)
+    #return np.log(1.0+acontrast / TRANSDUCER_EPS) * TRANSDUCER_MUL
 
 def _inverse_transducer(response):
     """Back from response to contrast; the inverse of Eq. 14."""
     return (np.abs(response) / TRANSDUCER_MUL + TRANSDUCER_EPS ** TRANSDUCER_EXPONENT) ** (1.0 / TRANSDUCER_EXPONENT) - TRANSDUCER_EPS
+    #aresponse = np.abs(response)
+    #return aresponse / (1.0 - aresponse)
+    #return np.expm1(aresponse / TRANSDUCER_MUL) * TRANSDUCER_EPS
 
 def _contrast_weights(gx, gy):
     """

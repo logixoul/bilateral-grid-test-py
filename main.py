@@ -91,11 +91,13 @@ def build_controls():
         # 1.0 would divide by zero in reapply_chroma, so the slider stops short of it
         dpg.add_slider_float(label="brightness", tag="brightness", default_value=0.002,
                              min_value=0.0, max_value=0.95, format="%.3f")
+        dpg.add_slider_int(label="times", tag="times", default_value=1,
+                             min_value=1, max_value=10)
 
     with dpg.collapsing_header(label="Transducer (multiples of base)", default_open=True):
         for tag, label in (("t_eps", "eps"), ("t_exponent", "exponent"), ("t_mul", "mul")):
             dpg.add_slider_float(label=label, tag=tag, default_value=1.0,
-                                 min_value=0.5, max_value=2.0)
+                                 min_value=0.01, max_value=1.0)
         dpg.add_text("", tag="transducer_values", wrap=PANEL_WIDTH - 30)
 
     with dpg.collapsing_header(label="Edge-aware AHE", default_open=False):
@@ -116,7 +118,7 @@ def build_controls():
 
 CONTROLS = ("operator", "strength", "iterations", "target_contrast", "brightness",
             "t_eps", "t_exponent", "t_mul", "s_spatial", "num_levels", "window_px",
-            "guided", "guided_eps")
+            "guided", "guided_eps", "times")
 
 
 def current_parameters():
@@ -150,6 +152,13 @@ def recompute():
             iterations=dpg.get_value("iterations"),
             target_contrast=dpg.get_value("target_contrast"),
             verbose=True)
+        for _ in range(dpg.get_value("times") - 1):
+            enhanced_log = MantiukContrastEqualization.enhance(
+                enhanced_log,
+                strength=dpg.get_value("strength"),
+                iterations=dpg.get_value("iterations"),
+                target_contrast=dpg.get_value("target_contrast"),
+                verbose=False)
     else:
         guided_eps = 10.0 ** dpg.get_value("guided_eps") if dpg.get_value("guided") else None
         enhanced_log = EdgeAwareAHE.enhance(
