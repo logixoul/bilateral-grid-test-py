@@ -38,9 +38,39 @@ def load_linear_rgb(path):
 
 
 def to_log_luminance(rgb):
-    """NTSC-weighted luminance in the log domain, plus the linear luminance itself."""
-    luminance = np.maximum(rgb @ NTSC_WEIGHTS, 1e-6)
+    """
+    NTSC-weighted luminance in the log domain, plus the linear luminance itself.
+
+    The floor sits a stop and a bit below the darkest light the image actually holds,
+    rather than at a fixed constant: a hard 1e-6 lands above the true minimum on a deep
+    RAW and below it on a shallow one, so the log range it produces has nothing to do
+    with the picture. Everything downstream reads tone as a position in that range, so
+    an arbitrary floor moves every threshold with it.
+    """
+    luminance = rgb @ NTSC_WEIGHTS
+
+    positive = luminance[luminance > 0.0]
+    floor = 0.1 * float(positive.min()) if positive.size else 1e-6
+
+    luminance = np.maximum(luminance, floor)
     return np.log(luminance), luminance
+
+def signed_gamma(log_luminance, gamma):
+    """
+    Gamma applied to log-luminance, before the operator rather than after it.
+
+    Log-luminance is negative everywhere below white and zero at white, so raising it to
+    a power needs the sign handled separately: the exponent goes on the magnitude, which
+    is the distance in stops below white, and the sign goes back on afterwards. White is
+    the pivot and stays put.
+
+    Above 1 the shadows stretch further down, below 1 they pull up towards white.
+    """
+    if gamma == 1.0:
+        return log_luminance
+
+    return np.sign(log_luminance) * np.abs(log_luminance) ** gamma
+
 
 def _smoothstep(edge0, edge1, x):
     # Scale, clamp and check limits
@@ -48,7 +78,8 @@ def _smoothstep(edge0, edge1, x):
     # Apply smoothstep formula
     return x * x * (3 - 2 * x)
 
-def reapply_chroma(rgb, luminance, enhanced_log_luminance, brightness=0.5):
+def reapply_chroma(rgb, luminance, enhanced_log_luminance, brightness=0.5,
+                   anchor_to_input=False, reference_log=None):
     """
     Undo the log and put chroma back, as BGR ready for display.
 
@@ -56,14 +87,30 @@ def reapply_chroma(rgb, luminance, enhanced_log_luminance, brightness=0.5):
     changed by the operator -- hue and saturation ride along untouched.
 
     Fine tuned normalization behavior for maximal visual impact - do not change unless you know what you are doing.
+
+    anchor_to_input takes the two rescalings from the INPUT's distribution instead of the
+    enhanced one. Equalization deliberately flattens the histogram, so a tone that sat
+    near the bottom of the input's narrow band sits mid-way up the output's full-range
+    one and displays far brighter -- at the same value. Anchoring keeps a given tone
+    landing in the same place it did before the operator ran, which is what stops
+    shadows being promoted to midtones. Off by default: it changes the look.
     """
-    low, high = np.percentile(enhanced_log_luminance, [0.0, 100.0])
+    if not anchor_to_input:
+        reference = enhanced_log_luminance
+    elif reference_log is not None:
+        reference = reference_log        # whatever the operator was actually fed
+    else:
+        reference = np.log(luminance)
+
+    low, high = np.percentile(reference, [0.0, 100.0])
     enhanced_log_luminance01 = (enhanced_log_luminance - low) / (high - low)
     enhanced_log_luminance01 = np.clip(enhanced_log_luminance01, 0.0, 1.0)
+    reference01 = np.clip((reference - low) / (high - low), 0.0, 1.0)
 
     enhanced_luminance = np.exp(enhanced_log_luminance01 / (1.0 - brightness))
     trim_percent = 1.0
-    low, high = np.percentile(enhanced_luminance, [trim_percent, 100.0 - trim_percent])
+    low, high = np.percentile(np.exp(reference01 / (1.0 - brightness)),
+                              [trim_percent, 100.0 - trim_percent])
     enhanced_luminance01 = (enhanced_luminance - low) / (high - low)
     enhanced_luminance01 = np.clip(enhanced_luminance01, 0.0, 1.0)
     enhanced_rgb = rgb * (enhanced_luminance01 / luminance)[:, :, None]
@@ -88,7 +135,7 @@ def apply_saturation(bgr, saturation):
 
 # --- Interface ---------------------------------------------------------------------
 
-IMAGE_PATH = "run/test.exr"
+IMAGE_PATH = "run/noise_test.dng"
 TEXTURE = "preview_texture"
 PANEL_WIDTH = 340
 PREVIEW_WIDTH = 1000
@@ -114,11 +161,16 @@ def build_controls():
         dpg.add_slider_float(label="target contrast", tag="target_contrast",
                              default_value=0.0002, min_value=0.0002, max_value=0.1,
                              format="%.4f")
-        # 1.0 would divide by zero in reapply_chroma, so the slider stops short of it
-        dpg.add_slider_float(label="brightness", tag="brightness", default_value=0.002,
-                             min_value=0.0, max_value=0.95, format="%.3f")
+        # gamma on the log-luminance, applied BEFORE the operator: above 1 stretches the
+        # shadows further down, below 1 pulls them up towards white
+        dpg.add_slider_float(label="pre-gamma", tag="pre_gamma", default_value=1.0,
+                             min_value=0.2, max_value=3.0, format="%.3f")
         dpg.add_slider_float(label="saturation", tag="saturation", default_value=1.0,
                              min_value=0.0, max_value=2.0)
+        # keeps a tone displaying where it did before the operator ran, so equalization
+        # cannot promote shadows to midtones just by flattening the histogram
+        dpg.add_checkbox(label="anchor display to input", tag="anchor_to_input",
+                         default_value=False)
         dpg.add_slider_int(label="times", tag="times", default_value=1,
                              min_value=1, max_value=10)
 
@@ -135,6 +187,13 @@ def build_controls():
                              default_value=112.0, min_value=4.0, max_value=400.0)
         dpg.add_slider_float(label="sigma range", tag="cdf_sigma_range", default_value=0.6,
                              min_value=0.05, max_value=1.5)
+        # 1 is the identity mapping, 30 never binds -- see _limit_contrast
+        dpg.add_slider_float(label="clip limit", tag="cdf_clip_limit", default_value=30.0,
+                             min_value=1.0, max_value=30.0)
+        # fraction of the image dark enough to keep its original tone instead of
+        # being equalized up into the midtones; 0 equalizes everything
+        dpg.add_slider_float(label="shadow guard", tag="cdf_shadow_guard",
+                             default_value=0.45, min_value=0.0, max_value=1.0)
 
     dpg.add_separator()
     dpg.add_button(label="Open Image...", callback=lambda: dpg.show_item("open_dialog"),
@@ -144,9 +203,11 @@ def build_controls():
     dpg.add_text("", tag="status", wrap=PANEL_WIDTH - 30)
 
 
-CONTROLS = ("operator", "strength", "iterations", "target_contrast", "brightness",
-            "t_eps", "t_exponent", "t_mul", "times", "saturation",
-            "cdf_levels", "cdf_sigma_spatial", "cdf_sigma_range")
+CONTROLS = ("operator", "strength", "iterations", "target_contrast",
+            "t_eps", "t_exponent", "t_mul", "times", "saturation", "anchor_to_input",
+            "pre_gamma",
+            "cdf_levels", "cdf_sigma_spatial", "cdf_sigma_range", "cdf_clip_limit",
+            "cdf_shadow_guard")
 
 
 def current_parameters():
@@ -163,6 +224,10 @@ def recompute():
     """Run the selected operator and push the result into the preview texture."""
     started = time.time()
 
+    # The tone curve now sits in front of the operator, so everything downstream --
+    # the operator, the display scaling, the anchor -- works in the same space
+    working_log = signed_gamma(state["log_luminance"], dpg.get_value("pre_gamma"))
+
     if dpg.get_value("operator").startswith("Mantiuk"):
         scales = (dpg.get_value("t_eps"), dpg.get_value("t_exponent"), dpg.get_value("t_mul"))
         (MantiukContrastEqualization.TRANSDUCER_EPS,
@@ -175,7 +240,7 @@ def recompute():
             MantiukContrastEqualization.TRANSDUCER_MUL))
 
         enhanced_log = MantiukContrastEqualization.enhance(
-            state["log_luminance"],
+            working_log,
             strength=dpg.get_value("strength"),
             iterations=dpg.get_value("iterations"),
             target_contrast=dpg.get_value("target_contrast"),
@@ -189,13 +254,15 @@ def recompute():
                 verbose=False)
     else:
         enhanced_log = EdgeAwareAHE2.enhance(
-            state["log_luminance"],
+            working_log,
             num_levels=dpg.get_value("cdf_levels"),
             sigma_spatial=dpg.get_value("cdf_sigma_spatial"),
-            sigma_range=dpg.get_value("cdf_sigma_range"))
+            sigma_range=dpg.get_value("cdf_sigma_range"),
+            clip_limit=dpg.get_value("cdf_clip_limit"),
+            shadow_guard=dpg.get_value("cdf_shadow_guard"))
 
-    bgr = reapply_chroma(state["rgb"], state["luminance"], enhanced_log,
-                         dpg.get_value("brightness"))
+    bgr = reapply_chroma(state["rgb"], state["luminance"], enhanced_log, 0.0,
+                         dpg.get_value("anchor_to_input"), reference_log=working_log)
     bgr = apply_saturation(bgr, dpg.get_value("saturation"))
     state["bgr"] = bgr
 
