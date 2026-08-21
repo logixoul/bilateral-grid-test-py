@@ -128,7 +128,8 @@ def build_controls():
 
 CONTROLS = ("operator", "strength", "iterations", "target_contrast", "brightness",
             "t_eps", "t_exponent", "t_mul", "s_spatial", "num_levels", "window_px",
-            "guided", "guided_eps", "times")
+            "guided", "guided_eps", "times",
+            "cdf_levels", "cdf_sigma_spatial", "cdf_sigma_range")
 
 
 def current_parameters():
