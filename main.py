@@ -14,6 +14,7 @@ import OpenEXR
 import dearpygui.dearpygui as dpg
 
 import EdgeAwareAHE
+import EdgeAwareAHE2
 import MantiukContrastEqualization
 
 NTSC_WEIGHTS = np.array([0.299, 0.587, 0.114], dtype=np.float32)
@@ -77,7 +78,8 @@ state = {}
 
 def build_controls():
     """Every knob, grouped. Values are read off the widgets when recomputing."""
-    dpg.add_radio_button(("Mantiuk contrast equalization", "Edge-aware AHE"),
+    dpg.add_radio_button(("Mantiuk contrast equalization", "Edge-aware AHE",
+                          "Edge-aware AHE 2 (local CDF)"),
                          tag="operator", default_value="Mantiuk contrast equalization")
 
     with dpg.collapsing_header(label="Mantiuk", default_open=True):
@@ -110,6 +112,14 @@ def build_controls():
         dpg.add_checkbox(label="edge-aware blur", tag="guided", default_value=True)
         dpg.add_slider_float(label="log10 eps", tag="guided_eps", default_value=-4.0,
                              min_value=-4.0, max_value=-1.0)
+
+    with dpg.collapsing_header(label="Edge-aware AHE 2", default_open=False):
+        dpg.add_slider_int(label="levels", tag="cdf_levels", default_value=48,
+                           min_value=8, max_value=96)
+        dpg.add_slider_float(label="sigma spatial", tag="cdf_sigma_spatial",
+                             default_value=112.0, min_value=4.0, max_value=400.0)
+        dpg.add_slider_float(label="sigma range", tag="cdf_sigma_range", default_value=0.6,
+                             min_value=0.05, max_value=1.5)
 
     dpg.add_separator()
     dpg.add_button(label="Save PNG", callback=save_png, width=-1)
@@ -159,6 +169,12 @@ def recompute():
                 iterations=dpg.get_value("iterations"),
                 target_contrast=dpg.get_value("target_contrast"),
                 verbose=False)
+    elif dpg.get_value("operator").endswith("(local CDF)"):
+        enhanced_log = EdgeAwareAHE2.enhance(
+            state["log_luminance"],
+            num_levels=dpg.get_value("cdf_levels"),
+            sigma_spatial=dpg.get_value("cdf_sigma_spatial"),
+            sigma_range=dpg.get_value("cdf_sigma_range"))
     else:
         guided_eps = 10.0 ** dpg.get_value("guided_eps") if dpg.get_value("guided") else None
         enhanced_log = EdgeAwareAHE.enhance(

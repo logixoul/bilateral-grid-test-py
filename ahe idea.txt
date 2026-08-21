@@ -1,0 +1,9 @@
+Edge-aware local CDF — the one to actually build
+
+Since you already have a normalized edge-aware linear filter with a fixed guide, you get this almost for free. Pick threshold levels t₁…t_K over log-luminance, then:
+
+C_k = DTF( 1[L < t_k] , guide = L )     // k = 1..K
+
+Each C_k(p) is the edge-aware local fraction of pixels below t_k — i.e. the local CDF sampled at t_k, with weights that decay across edges instead of across space. Output is C interpolated at t = L(p) (linear in k is fine; monotone cubic if you see banding). Because the DTF weights are normalized and non-negative, each C_k ∈ [0,1] and C_k is monotone in k automatically, so the mapping is a valid CDF at every pixel with no extra constraints.
+
+Cost: K passes of your existing filter, K ≈ 32–64 is usually plenty for tonemapping, and RF-mode DTF is cheap enough that this is seconds not minutes at 1MP. Memory is the real cost (K float planes), but you can stream: accumulate the interpolation on the fly and keep only two levels resident.
