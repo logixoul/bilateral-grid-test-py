@@ -6,12 +6,17 @@ reapplying chroma afterwards, and the Dear PyGui interface. The two operators ar
 independent implementations that share only the log-luminance in / log-luminance out
 interface.
 """
+import ctypes
+import ctypes.wintypes
+import os
+import queue
 import time
 
 import numpy as np
 import cv2
-import OpenEXR
 import dearpygui.dearpygui as dpg
+
+import image_io
 
 import EdgeAwareAHE
 import EdgeAwareAHE2
@@ -21,11 +26,16 @@ NTSC_WEIGHTS = np.array([0.299, 0.587, 0.114], dtype=np.float32)
 
 
 def load_linear_rgb(path):
-    """Load a linear HDR image, normalized by its single brightest R, G or B sample."""
-    rgb = OpenEXR.File(path).channels()["RGB"].pixels.astype(np.float32)
-    scale_factor = 1000 / rgb.shape[1]  # scale to 1000px wide for speed
-    rgb = cv2.resize(rgb, dsize=None, fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_AREA)
-    return np.clip(rgb / rgb.max(), 0.0, 1.0)
+    """Load any supported image, normalized by its single brightest R, G or B sample."""
+    rgb = image_io.load(path)
+
+    scale_factor = PREVIEW_WIDTH / rgb.shape[1]  # scale to a fixed width for speed
+    if scale_factor < 1.0:
+        rgb = cv2.resize(rgb, dsize=None, fx=scale_factor, fy=scale_factor,
+                         interpolation=cv2.INTER_AREA)
+
+    peak = float(rgb.max())
+    return np.clip(rgb / peak, 0.0, 1.0) if peak > 0.0 else rgb
 
 
 def to_log_luminance(rgb):
@@ -67,6 +77,7 @@ def reapply_chroma(rgb, luminance, enhanced_log_luminance, brightness=0.5):
 IMAGE_PATH = "run/test.exr"
 TEXTURE = "preview_texture"
 PANEL_WIDTH = 340
+PREVIEW_WIDTH = 1000
 
 # Transducer sliders scale these, so capture them before anything is overwritten
 TRANSDUCER_BASE = (MantiukContrastEqualization.TRANSDUCER_EPS,
@@ -122,7 +133,10 @@ def build_controls():
                              min_value=0.05, max_value=1.5)
 
     dpg.add_separator()
+    dpg.add_button(label="Open Image...", callback=lambda: dpg.show_item("open_dialog"),
+                   width=-1)
     dpg.add_button(label="Save PNG", callback=save_png, width=-1)
+    dpg.add_text("or drop an EXR / HDR / RAW file on the window", wrap=PANEL_WIDTH - 30)
     dpg.add_text("", tag="status", wrap=PANEL_WIDTH - 30)
 
 
@@ -198,6 +212,108 @@ def recompute():
     dpg.set_value("status", "recomputed in %.2fs" % (time.time() - started))
 
 
+def show_image(path):
+    """Swap in a newly dropped file, resizing the preview texture to match it."""
+    dpg.set_value("status", "loading %s..." % os.path.basename(path))
+    dpg.render_dearpygui_frame()
+
+    try:
+        rgb = load_linear_rgb(path)
+    except Exception as error:
+        dpg.set_value("status", "could not load %s: %s" % (os.path.basename(path), error))
+        return
+
+    log_luminance, luminance = to_log_luminance(rgb)
+    height, width = rgb.shape[:2]
+    state.update(rgb=rgb, log_luminance=log_luminance, luminance=luminance, bgr=None,
+                 path=path)
+
+    # A raw texture's size is fixed at creation, so a differently shaped image needs a
+    # new one -- and the image widget pointing at it has to be rebuilt alongside
+    if (height, width) != state.get("texture_shape"):
+        dpg.delete_item("preview_image")
+        dpg.delete_item(TEXTURE)
+        dpg.add_raw_texture(width, height, np.zeros(width * height * 4, dtype=np.float32),
+                            format=dpg.mvFormat_Float_rgba, tag=TEXTURE, parent="textures")
+        dpg.add_image(TEXTURE, tag="preview_image", parent="preview_slot")
+        state["texture_shape"] = (height, width)
+
+    dpg.set_viewport_title("Local Contrast - %s" % os.path.basename(path))
+
+
+def open_dialog_callback(sender, app_data):
+    for path in (app_data.get("selections") or {}).values():
+        show_image(path)
+        break
+
+
+WM_DROPFILES = 0x0233
+GWLP_WNDPROC = -4
+dropped_paths = queue.Queue()
+_window_procedure = None       # kept alive: a ctypes callback must outlive the window
+_previous_procedure = None
+
+
+def _handle_message(hwnd, message, wparam, lparam):
+    """Window procedure hook: pick file drops out of the message stream."""
+    if message == WM_DROPFILES:
+        # wparam is an HDROP, so it has to be handed back as a pointer -- letting ctypes
+        # convert it as a plain int truncates the handle to 32 bits
+        drop = ctypes.c_void_p(wparam)
+        shell32 = ctypes.windll.shell32
+
+        count = shell32.DragQueryFileW(drop, 0xFFFFFFFF, None, 0)
+        for index in range(count):
+            length = shell32.DragQueryFileW(drop, index, None, 0)
+            buffer = ctypes.create_unicode_buffer(length + 1)
+            shell32.DragQueryFileW(drop, index, buffer, length + 1)
+            dropped_paths.put(buffer.value)
+
+        shell32.DragFinish(drop)
+        return 0
+
+    return ctypes.windll.user32.CallWindowProcW(_previous_procedure, hwnd, message,
+                                                wparam, lparam)
+
+
+def enable_file_drops(title):
+    """
+    Ask Windows to accept dropped files and intercept the resulting message.
+
+    Dear PyGui 2.3 has drag and drop between its own widgets but nothing for files coming
+    from the OS, so this goes to the window directly: opt the window into drops, then
+    chain our own procedure in front of the existing one.
+    """
+    global _window_procedure, _previous_procedure
+
+    hwnd = ctypes.windll.user32.FindWindowW(None, title)
+    if not hwnd:
+        return False
+
+    prototype = ctypes.WINFUNCTYPE(ctypes.c_longlong, ctypes.wintypes.HWND, ctypes.c_uint,
+                                   ctypes.c_ulonglong, ctypes.c_longlong)
+    _window_procedure = prototype(_handle_message)
+
+    shell32 = ctypes.windll.shell32
+    shell32.DragQueryFileW.restype = ctypes.c_uint
+    shell32.DragQueryFileW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_wchar_p,
+                                       ctypes.c_uint]
+    shell32.DragFinish.argtypes = [ctypes.c_void_p]
+    shell32.DragAcceptFiles.argtypes = [ctypes.wintypes.HWND, ctypes.c_bool]
+
+    user32 = ctypes.windll.user32
+    user32.SetWindowLongPtrW.restype = ctypes.c_longlong
+    user32.SetWindowLongPtrW.argtypes = [ctypes.wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+    user32.CallWindowProcW.restype = ctypes.c_longlong
+    user32.CallWindowProcW.argtypes = [ctypes.c_void_p, ctypes.wintypes.HWND, ctypes.c_uint,
+                                       ctypes.c_ulonglong, ctypes.c_longlong]
+
+    _previous_procedure = user32.SetWindowLongPtrW(hwnd, GWLP_WNDPROC,
+                                                   ctypes.cast(_window_procedure, ctypes.c_void_p))
+    shell32.DragAcceptFiles(hwnd, True)
+    return bool(_previous_procedure)
+
+
 def save_png():
     if state.get("bgr") is not None:
         cv2.imwrite("run/output_enhanced.png",
@@ -209,28 +325,43 @@ if __name__ == "__main__":
     rgb_img = load_linear_rgb(IMAGE_PATH)
     log_luminance, luminance = to_log_luminance(rgb_img)
     height, width = rgb_img.shape[:2]
-    state.update(rgb=rgb_img, log_luminance=log_luminance, luminance=luminance, bgr=None)
+    state.update(rgb=rgb_img, log_luminance=log_luminance, luminance=luminance, bgr=None,
+                 texture_shape=(height, width), path=IMAGE_PATH)
 
     dpg.create_context()
     dpg.create_viewport(title="Local Contrast", width=width + PANEL_WIDTH + 40,
                         height=height + 60)
 
-    with dpg.texture_registry():
+    with dpg.texture_registry(tag="textures"):
         dpg.add_raw_texture(width, height, np.zeros(width * height * 4, dtype=np.float32),
                             format=dpg.mvFormat_Float_rgba, tag=TEXTURE)
+
+    extensions = sorted(image_io.SUPPORTED_EXTENSIONS)
+    with dpg.file_dialog(tag="open_dialog", show=False, callback=open_dialog_callback,
+                         width=700, height=450, directory_selector=False):
+        dpg.add_file_extension("Images{" + ",".join(extensions) + "}")
+        dpg.add_file_extension(".*")
 
     with dpg.window(tag="root"):
         with dpg.group(horizontal=True):
             with dpg.child_window(width=PANEL_WIDTH, autosize_y=True):
                 build_controls()
-            dpg.add_image(TEXTURE)
+            with dpg.group(tag="preview_slot"):
+                dpg.add_image(TEXTURE, tag="preview_image")
 
     dpg.set_primary_window("root", True)
     dpg.setup_dearpygui()
     dpg.show_viewport()
 
+    if not enable_file_drops(dpg.get_viewport_title()):
+        dpg.set_value("status", "drag and drop unavailable; use Open Image")
+
     parameters = None
     while dpg.is_dearpygui_running():
+        while not dropped_paths.empty():
+            show_image(dropped_paths.get())
+            parameters = None                    # force a recompute for the new image
+
         # Recompute once the user lets go of a slider, not on every frame of a drag
         if parameters != current_parameters() and not any_control_active():
             parameters = current_parameters()
