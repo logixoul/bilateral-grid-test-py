@@ -72,6 +72,21 @@ def reapply_chroma(rgb, luminance, enhanced_log_luminance, brightness=0.5):
     return np.clip(np.ascontiguousarray(enhanced_rgb[:, :, ::-1]), 0.0, 1.0)
 
 
+def apply_saturation(bgr, saturation):
+    """
+    Push colour away from, or towards, the greyscale version of the image.
+
+    A straight lerp: 0 lands on greyscale, 1 leaves the image alone, and anything above
+    extrapolates past the original. Luminance is the same NTSC-weighted grey the
+    operators equalize, so changing saturation does not change how bright a pixel reads.
+    """
+    if saturation == 1.0:
+        return bgr
+
+    grey = bgr @ NTSC_WEIGHTS[::-1]        # reapply_chroma hands back BGR, so flip the weights
+    return np.clip(grey[:, :, None] + saturation * (bgr - grey[:, :, None]), 0.0, 1.0)
+
+
 # --- Interface ---------------------------------------------------------------------
 
 IMAGE_PATH = "run/test.exr"
@@ -104,6 +119,8 @@ def build_controls():
         # 1.0 would divide by zero in reapply_chroma, so the slider stops short of it
         dpg.add_slider_float(label="brightness", tag="brightness", default_value=0.002,
                              min_value=0.0, max_value=0.95, format="%.3f")
+        dpg.add_slider_float(label="saturation", tag="saturation", default_value=1.0,
+                             min_value=0.0, max_value=2.0)
         dpg.add_slider_int(label="times", tag="times", default_value=1,
                              min_value=1, max_value=10)
 
@@ -142,7 +159,7 @@ def build_controls():
 
 CONTROLS = ("operator", "strength", "iterations", "target_contrast", "brightness",
             "t_eps", "t_exponent", "t_mul", "s_spatial", "num_levels", "window_px",
-            "guided", "guided_eps", "times",
+            "guided", "guided_eps", "times", "saturation",
             "cdf_levels", "cdf_sigma_spatial", "cdf_sigma_range")
 
 
@@ -201,6 +218,7 @@ def recompute():
 
     bgr = reapply_chroma(state["rgb"], state["luminance"], enhanced_log,
                          dpg.get_value("brightness"))
+    bgr = apply_saturation(bgr, dpg.get_value("saturation"))
     state["bgr"] = bgr
 
     # The texture wants RGBA floats; reapply_chroma hands back BGR for OpenCV's benefit
