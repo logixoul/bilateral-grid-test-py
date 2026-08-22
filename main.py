@@ -55,21 +55,27 @@ def to_log_luminance(rgb):
     luminance = np.maximum(luminance, floor)
     return np.log(luminance), luminance
 
-def signed_gamma(log_luminance, gamma):
+def tonal_gamma(log_luminance, gamma):
     """
-    Gamma applied to log-luminance, before the operator rather than after it.
+    Gamma applied across the tonal range, before the operator rather than after it.
 
-    Log-luminance is negative everywhere below white and zero at white, so raising it to
-    a power needs the sign handled separately: the exponent goes on the magnitude, which
-    is the distance in stops below white, and the sign goes back on afterwards. White is
-    the pivot and stays put.
+    Log-luminance is compressed to [0, 1] over the range this image actually covers, the
+    exponent is applied there, and the result is expanded back. Both ends are fixed
+    points, so black stays black and white stays white and the dynamic range comes out
+    unchanged -- only the distribution between them moves. Raising the log magnitude
+    directly would instead scale with however many stops the file happens to span, and
+    the range would change by more than an order of magnitude across the slider.
 
-    Above 1 the shadows stretch further down, below 1 they pull up towards white.
+    Above 1 the midtones move down towards the shadows, below 1 they move up.
     """
     if gamma == 1.0:
         return log_luminance
 
-    return np.sign(log_luminance) * np.abs(log_luminance) ** gamma
+    low = float(log_luminance.min())
+    span = max(float(log_luminance.max()) - low, 1e-12)
+
+    normalized = (log_luminance - low) / span
+    return (normalized ** gamma) * span + low
 
 
 def _smoothstep(edge0, edge1, x):
@@ -161,10 +167,11 @@ def build_controls():
         dpg.add_slider_float(label="target contrast", tag="target_contrast",
                              default_value=0.0002, min_value=0.0002, max_value=0.1,
                              format="%.4f")
-        # gamma on the log-luminance, applied BEFORE the operator: above 1 stretches the
-        # shadows further down, below 1 pulls them up towards white
+        # Gamma across the tonal range, applied BEFORE the operator. On the display it
+        # reads backwards from the curve: pushing midtones down leaves the anchored
+        # normalization a wider band to work with, so the picture comes out brighter.
         dpg.add_slider_float(label="pre-gamma", tag="pre_gamma", default_value=1.0,
-                             min_value=0.2, max_value=3.0, format="%.3f")
+                             min_value=0.2, max_value=5.0, format="%.3f")
         dpg.add_slider_float(label="saturation", tag="saturation", default_value=1.0,
                              min_value=0.0, max_value=2.0)
         # keeps a tone displaying where it did before the operator ran, so equalization
@@ -226,7 +233,7 @@ def recompute():
 
     # The tone curve now sits in front of the operator, so everything downstream --
     # the operator, the display scaling, the anchor -- works in the same space
-    working_log = signed_gamma(state["log_luminance"], dpg.get_value("pre_gamma"))
+    working_log = tonal_gamma(state["log_luminance"], dpg.get_value("pre_gamma"))
 
     if dpg.get_value("operator").startswith("Mantiuk"):
         scales = (dpg.get_value("t_eps"), dpg.get_value("t_exponent"), dpg.get_value("t_mul"))
